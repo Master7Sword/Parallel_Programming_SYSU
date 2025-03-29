@@ -21,22 +21,34 @@ void parallel_matrix_multiply(int rank, int size, double *A, double *B, double *
     double *local_A = (double *)malloc(local_m * n * sizeof(double));
     double *local_C = (double *)malloc(local_m * k * sizeof(double));
     
-    int *sendcounts = (int *)malloc(size * sizeof(int));
-    int *displs = (int *)malloc(size * sizeof(int));
-    
-    int offset = 0;
-    for (int i = 0; i < size; i++) {
-        sendcounts[i] = (i < extra_rows) ? (rows_per_process + 1) * n : rows_per_process * n;
-        displs[i] = offset;
-        offset += sendcounts[i];
+    // 分发A矩阵
+    if (rank == MASTER) {
+        int offset = 0;
+        for (int dest = 0; dest < size; dest++) {
+            int dest_rows = (dest < extra_rows) ? rows_per_process + 1 : rows_per_process;
+            if (dest == MASTER) {
+                for (int i = 0; i < dest_rows * n; i++) {
+                    local_A[i] = A[offset + i];
+                }
+            } else {
+                MPI_Send(A + offset, dest_rows * n, MPI_DOUBLE, dest, 0, MPI_COMM_WORLD);
+            }
+            offset += dest_rows * n;
+        }
+    } else {
+        MPI_Recv(local_A, local_m * n, MPI_DOUBLE, MASTER, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
     
-    MPI_Scatterv(A, sendcounts, displs, MPI_DOUBLE, 
-                local_A, local_m * n, MPI_DOUBLE, 
-                MASTER, MPI_COMM_WORLD);
+    // 广播B矩阵
+    if (rank == MASTER) {
+        for (int dest = 1; dest < size; dest++) {
+            MPI_Send(B, n * k, MPI_DOUBLE, dest, 1, MPI_COMM_WORLD);
+        }
+    } else {
+        MPI_Recv(B, n * k, MPI_DOUBLE, MASTER, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    }
     
-    MPI_Bcast(B, n * k, MPI_DOUBLE, MASTER, MPI_COMM_WORLD);
-    
+    // 本地计算
     for (int i = 0; i < local_m; i++) {
         for (int j = 0; j < k; j++) {
             local_C[i * k + j] = 0.0;
@@ -46,26 +58,26 @@ void parallel_matrix_multiply(int rank, int size, double *A, double *B, double *
         }
     }
     
-    int *recvcounts = (int *)malloc(size * sizeof(int));
-    int *recvdispls = (int *)malloc(size * sizeof(int));
-    
-    offset = 0;
-    for (int i = 0; i < size; i++) {
-        recvcounts[i] = (i < extra_rows) ? (rows_per_process + 1) * k : rows_per_process * k;
-        recvdispls[i] = offset;
-        offset += recvcounts[i];
+    // 收集结果
+    if (rank == MASTER) {
+        int offset = 0;
+        for (int src = 0; src < size; src++) {
+            int src_rows = (src < extra_rows) ? rows_per_process + 1 : rows_per_process;
+            if (src == MASTER) {
+                for (int i = 0; i < src_rows * k; i++) {
+                    C[offset + i] = local_C[i];
+                }
+            } else {
+                MPI_Recv(C + offset, src_rows * k, MPI_DOUBLE, src, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
+            offset += src_rows * k;
+        }
+    } else {
+        MPI_Send(local_C, local_m * k, MPI_DOUBLE, MASTER, 2, MPI_COMM_WORLD);
     }
-    
-    MPI_Gatherv(local_C, local_m * k, MPI_DOUBLE, 
-               C, recvcounts, recvdispls, MPI_DOUBLE, 
-               MASTER, MPI_COMM_WORLD);
     
     free(local_A);
     free(local_C);
-    free(sendcounts);
-    free(displs);
-    free(recvcounts);
-    free(recvdispls);
 }
 
 int main(int argc, char *argv[]) {
@@ -98,7 +110,6 @@ int main(int argc, char *argv[]) {
         srand(time(NULL));
         initialize_matrix(A, m, n);
         initialize_matrix(B, n, k);
-        
     } else {
         B = (double *)malloc(n * k * sizeof(double));
     }
@@ -112,9 +123,7 @@ int main(int argc, char *argv[]) {
     end_time = MPI_Wtime();
     
     if (rank == MASTER) {
-        
         printf("\nMatrix multiplication time: %.6f seconds\n", end_time - start_time);
-
         free(A);
         free(B);
         free(C);
